@@ -1,0 +1,333 @@
+version: '3.8'
+
+services:
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    # I run Plex in host networking so DLNA / discovery / casting work properly.
+    network_mode: host
+    environment:
+      - PUID=${PLEX_PUID}
+      - PGID=${PLEX_PGID}
+      - TZ=${TZ}
+      - VERSION=docker
+      - PLEX_CLAIM=${PLEX_CLAIM}   # used on first run to claim server to my account
+    ports:
+      - 32400:32400
+    devices:
+      # I map my iGPU / QuickSync device so Plex can hardware transcode.
+      - /dev/dri:/dev/dri
+    volumes:
+      # Plex config/state
+      - ${BASE_PATH}/plex/config:/config
+      # My media library (Movies / Shows / Music, etc.)
+      - ${MEDIA_SHARE}:/media
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    # Radarr manages movies and hands downloads to qBittorrent/nzbget.
+    environment:
+      - PUID=${RADARR_PUID}
+      - PGID=${RADARR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/radarr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 7878:7878
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    # Sonarr manages TV/anime and fetches episodes automatically.
+    environment:
+      - PUID=${SONARR_PUID}
+      - PGID=${SONARR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/sonarr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 8989:8989
+    restart: unless-stopped
+
+  readarr:
+    image: lscr.io/linuxserver/readarr:develop
+    container_name: readarr
+    # Readarr tracks audiobooks / ebooks in a similar way for books.
+    environment:
+      - PUID=${READARR_PUID}
+      - PGID=${READARR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/readarr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 8787:8787
+    restart: unless-stopped
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    # Lidarr manages music libraries and pulls in albums/artists.
+    environment:
+      - PUID=${LIDARR_PUID}
+      - PGID=${LIDARR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/lidarr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 8686:8686
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    # Prowlarr centralizes indexers so I only configure them once.
+    environment:
+      - PUID=${PROWLARR_PUID}
+      - PGID=${PROWLARR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/prowlarr/config:/config
+    ports:
+      - 9696:9696
+    restart: unless-stopped
+
+  autobrr:
+    container_name: autobrr
+    image: ghcr.io/autobrr/autobrr:latest
+    # autobrr filters live indexer announcements and forwards matching releases.
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - PUID=${AUTOBRR_PUID}
+      - PGID=${AUTOBRR_PGID}
+    volumes:
+      - ${BASE_PATH}/autobrr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 7474:7474
+
+  nzbget:
+    image: ghcr.io/linuxserver/nzbget
+    container_name: nzbget
+    # nzbget handles my Usenet downloads.
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/nzbget/config:/config
+      - ${MEDIA_SHARE}/Usenet:/media/Usenet
+    ports:
+      - 6789:6789
+    restart: unless-stopped
+
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    # gluetun is my VPN tunnel. qBittorrent will share this network namespace.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
+      - VPN_TYPE=openvpn
+      - SERVER_COUNTRIES=${VPN_COUNTRY}
+      - OPENVPN_USER=${VPN_USERNAME}
+      - OPENVPN_PASSWORD=${VPN_PASSWORD}
+      - TZ=${TZ}
+    ports:
+      # I forward qBittorrent's ports here since it lives inside gluetun.
+      - 8080:8080       # qBittorrent Web UI
+      - 8999:8999
+      - 6881:6881
+      - 6881:6881/udp
+    volumes:
+      - ${BASE_PATH}/gluetun:/gluetun
+    restart: unless-stopped
+
+  qbittorrent:
+    image: linuxserver/qbittorrent
+    container_name: qbittorrent
+    # qBittorrent shares gluetun's network namespace, meaning all torrent traffic
+    # is forced through the VPN tunnel.
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${QBITTORRENT_PUID}
+      - PGID=${QBITTORRENT_PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8080
+    volumes:
+      - ${BASE_PATH}/qbittorrent/config:/config
+      # I mount the common download directory so the *arr apps can import
+      # using hardlinks instead of copying.
+      - ${MEDIA_SHARE}/Downloads:/media/Downloads:rw
+    restart: unless-stopped
+    depends_on:
+      - gluetun
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    # Portainer gives me a browser UI to manage containers.
+    ports:
+      - 9443:9443
+    volumes:
+      - /data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    # Overseerr is the request portal for new media.
+    environment:
+      - PUID=${OVERSEERR_PUID}
+      - PGID=${OVERSEERR_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/overseerr/config:/config
+      - ${MEDIA_SHARE}:/media
+    ports:
+      - 5055:5055
+    restart: unless-stopped
+
+  tautulli:
+    image: lscr.io/linuxserver/tautulli:latest
+    container_name: tautulli
+    # Tautulli tracks Plex usage / watch stats.
+    environment:
+      - PUID=${TAUTULLI_PUID}
+      - PGID=${TAUTULLI_PGID}
+      - TZ=${TZ}
+    volumes:
+      - ${BASE_PATH}/tautulli:/config
+    ports:
+      - 8181:8181
+    restart: unless-stopped
+
+  tdarr:
+    container_name: tdarr
+    image: ghcr.io/haveagitgat/tdarr:latest
+    # Tdarr normalizes/transcodes my media in bulk.
+    restart: unless-stopped
+    ports:
+      - 8265:8265   # Web UI
+      - 8266:8266   # Node comms
+    environment:
+      - TZ=${TZ}
+      - PUID=${TDARR_PUID}
+      - PGID=${TDARR_PGID}
+      - UMASK_SET=002
+      - nodeName=ServerNode
+      - serverIP=REPLACE_ME_LOCAL_HOST_IP   # set this to your host machine's LAN IP
+      - serverPort=8266
+      - webUIPort=8265
+      - internalNode=true
+      - inContainer=true
+      - ffmpegVersion=6
+    volumes:
+      - ${BASE_PATH}/tdarr/server:/app/server
+      - ${BASE_PATH}/tdarr/configs:/app/configs
+      - ${BASE_PATH}/tdarr/logs:/app/logs
+      - ${MEDIA_SHARE}:/media
+
+  lb_sync:
+    container_name: lb_sync
+    # lb_sync is my custom container. It runs run.py, which:
+    #  - polls Plex for current playback
+    #  - waits for finished tracks
+    #  - checks my final rating (like/dislike)
+    #  - logs likes/dislikes
+    #  - tells Lidarr to delete tracks I dislike
+    #  - exposes a Flask API on port 7000 for debugging and control
+    build:
+      context: ./lb_sync
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - PUID=${LIDARR_PUID}
+      - PGID=${LIDARR_PGID}
+
+      # ListenBrainz auth and identity
+      - LB_USER=${LB_USER}
+      - LB_TOKEN=${LB_TOKEN}
+
+      # Lidarr connection info
+      - LIDARR_URL=${LIDARR_URL}
+      - LIDARR_API_KEY=${LIDARR_API_KEY}
+
+      # MUST match the root folder path in Lidarr so new artists get added correctly
+      - MUSIC_ROOT=/media/Plex/Music
+
+      # Lidarr profile IDs
+      - QUALITY_PROFILE_ID=${QUALITY_PROFILE_ID}
+      - METADATA_PROFILE_ID=${METADATA_PROFILE_ID}
+
+      # Tagging / limiting
+      - TAG_ID=${TAG_ID}
+      - MAX_NEW_ARTISTS=${MAX_NEW_ARTISTS}
+      - MAX_NEW_ALBUMS=${MAX_NEW_ALBUMS}
+      - MODES=${MODES}
+
+      # Optional convenience var: a "weekly playlist" URL I might pull from
+      - WEEKLY_PLAYLIST_URL=https://listenbrainz.org/playlist/REPLACE_ME_PLAYLIST_ID/
+
+      # Plex details so I can poll playback and ratings
+      - PLEX_URL=${PLEX_URL}
+      - PLEX_TOKEN=${PLEX_TOKEN}
+      - PLEX_CLIENT_FILTER=${PLEX_CLIENT_FILTER}
+
+    env_file:
+      # I load any additional secrets/vars (the same ones in .env.example)
+      # from a real .env file that you do NOT commit.
+      - ./.env
+
+    ports:
+      - "7000:7000"   # Flask API for /liked, /disliked, /now, /health
+
+    volumes:
+      # I mount lb_sync source + config so I can iterate and also persist taste data.
+      - ${BASE_PATH}/lb_sync:/app
+      - ${MEDIA_SHARE}/Plex/Music:/media/Plex/Music
+      - ${BASE_PATH}/lb_sync/config:/app/config
+
+    networks:
+      - media_net
+
+    command: ["python", "/app/run.py"]
+
+  plex-beetbrainz:
+    image: ghcr.io/lyarenei/plex-beetbrainz:latest
+    container_name: plex-beetbrainz
+    # plex-beetbrainz scrobbles Plex plays to ListenBrainz.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      # Minimum seconds I have to listen before it counts as a play
+      - MINIMUM_PLAY_SECONDS=30
+      # Prevent duplicate scrobbles in a short window
+      - DEDUP_WINDOW_SECONDS=600
+      - TZ=${TZ}
+      # Map Plex username -> ListenBrainz token
+      # NOTE: format is "plex_username:listenbrainz_token"
+      - USER_TOKENS=${PBZ_PLEX_USER}:${LB_TOKEN}
+      - SERVER_PORT=5000
+      # Only scrobble if I listened to this % of the track
+      - LISTEN_THRESHOLD=${PBZ_LISTEN_THRESHOLD}
+
+networks:
+  media_net:
+    external: true
+    name: media_net
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
